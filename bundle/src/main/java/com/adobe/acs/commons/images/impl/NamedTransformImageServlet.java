@@ -92,7 +92,7 @@ import java.util.regex.Pattern;
                     + NamedTransformImageServlet.DEFAULT_FILENAME_PATTERN + " ]",
             name = NamedTransformImageServlet.NAMED_IMAGE_FILENAME_PATTERN,
             value = NamedTransformImageServlet.DEFAULT_FILENAME_PATTERN
-		),
+        ),
         @Property(
                 label = "Extension",
                 description = "",
@@ -122,13 +122,20 @@ import java.util.regex.Pattern;
 })
 @Service(Servlet.class)
 public class NamedTransformImageServlet extends SlingSafeMethodsServlet implements OptingServlet {
-	private static final Logger log = LoggerFactory.getLogger(NamedTransformImageServlet.class);
 
-	public static final String NAMED_IMAGE_FILENAME_PATTERN = "acs.commons.namedimage.filename.pattern";
+    private static final Logger log = LoggerFactory.getLogger(NamedTransformImageServlet.class);
 
-	public static final String DEFAULT_FILENAME_PATTERN = "(image|img)\\.(.+)";
+    public static final String NAME_IMAGE = "image";
 
-	@Reference
+    public static final String NAMED_IMAGE_FILENAME_PATTERN = "acs.commons.namedimage.filename.pattern";
+
+    public static final String DEFAULT_FILENAME_PATTERN = "(image|img)\\.(.+)";
+
+    public static final String RT_LOCAL_SOCIAL_IMAGE = "social:asiFile";
+
+    public static final String RT_REMOTE_SOCIAL_IMAGE = "nt:adobesocialtype";
+
+    @Reference
     private MimeTypeService mimeTypeService;
 
     private static final ValueMap EMPTY_PARAMS = new ValueMapDecorator(new LinkedHashMap<String, Object>());
@@ -136,6 +143,8 @@ public class NamedTransformImageServlet extends SlingSafeMethodsServlet implemen
     private static final String MIME_TYPE_PNG = "image/png";
 
     private static final String TYPE_QUALITY = "quality";
+
+    private static final String TYPE_PROGRESSIVE = "progressive";
 
     private Pattern lastSuffixPattern = Pattern.compile(DEFAULT_FILENAME_PATTERN);
 
@@ -154,7 +163,7 @@ public class NamedTransformImageServlet extends SlingSafeMethodsServlet implemen
             value = DEFAULT_ASSET_RENDITION_PICKER_REGEX)
     private static final String PROP_ASSET_RENDITION_PICKER_REGEX = "prop.asset-rendition-picker-regex";
 
-    private static RenditionPatternPicker renditionPatternPicker =
+    private RenditionPatternPicker renditionPatternPicker =
             new RenditionPatternPicker(Pattern.compile(DEFAULT_ASSET_RENDITION_PICKER_REGEX));
 
     /**
@@ -218,8 +227,18 @@ public class NamedTransformImageServlet extends SlingSafeMethodsServlet implemen
         final double quality = this.getQuality(mimeType,
                 imageTransformersWithParams.get(TYPE_QUALITY, EMPTY_PARAMS));
 
+        // Check if the image is a JPEG which has to be encoded progressively
+        final boolean progressiveJpeg = isProgressiveJpeg(mimeType,
+                imageTransformersWithParams.get(TYPE_PROGRESSIVE, EMPTY_PARAMS));
+
         response.setContentType(mimeType);
-        layer.write(mimeType, quality, response.getOutputStream());
+
+        if (progressiveJpeg) {
+            ProgressiveJpeg.write(layer, quality, response.getOutputStream());
+        } else {
+            layer.write(mimeType, quality, response.getOutputStream());
+        }
+
         response.flushBuffer();
     }
 
@@ -240,7 +259,7 @@ public class NamedTransformImageServlet extends SlingSafeMethodsServlet implemen
 
             final ImageTransformer imageTransformer = this.imageTransformers.get(type);
             if (imageTransformer == null) {
-                log.warn("Skipping transform. Missing ImageTransformer for type: {}");
+                log.warn("Skipping transform. Missing ImageTransformer for type: {}", type);
                 continue;
             }
 
@@ -348,9 +367,18 @@ public class NamedTransformImageServlet extends SlingSafeMethodsServlet implemen
             if (resourceResolver.isResourceType(resource, NameConstants.NT_PAGE)
                     || StringUtils.equals(resource.getPath(), page.getContentResource().getPath())) {
                 // Is a Page or Page's Content Resource; use the Page's image resource
-                return new Image(page.getContentResource(), "image");
+                return new Image(page.getContentResource(), NAME_IMAGE);
             } else {
                 return new Image(resource);
+            }
+        } else {
+            if (resourceResolver.isResourceType(resource, RT_LOCAL_SOCIAL_IMAGE)
+                    && resource.getValueMap().get("mimetype", StringUtils.EMPTY).startsWith("image/")) {
+                // Is a UGC image
+                return new SocialImageImpl(resource, NAME_IMAGE);
+            } else if (resourceResolver.isResourceType(resource, RT_REMOTE_SOCIAL_IMAGE)) {
+                // Is a UGC image
+                return new SocialRemoteImageImpl(resource, NAME_IMAGE);
             }
         }
 
@@ -429,7 +457,7 @@ public class NamedTransformImageServlet extends SlingSafeMethodsServlet implemen
         final int defaultQuality = 82;
         final int maxQuality = 100;
         final int minQuality = 0;
-        final int maxQualityGIF = 255;
+        final int maxQualityGif = 255;
         final double oneHundred = 100D;
 
         log.debug("Transforming with [ quality ]");
@@ -443,21 +471,40 @@ public class NamedTransformImageServlet extends SlingSafeMethodsServlet implemen
         quality = quality / oneHundred;
 
         if (StringUtils.equals("image/gif", mimeType)) {
-            quality = quality * maxQualityGIF;
+            quality = quality * maxQualityGif;
         }
 
         return quality;
+    }
+
+    /**
+     * @param mimeType mime type string
+     * @param transforms all transformers
+     * @return <code>true</code> for jpeg mime types if progressive encoding is enabled
+     */
+    protected boolean isProgressiveJpeg(final String mimeType, final ValueMap transforms) {
+        boolean enabled = transforms.get("enabled", false);
+        if (enabled) {
+            if ("image/jpeg".equals(mimeType) || "image/jpg".equals(mimeType)) {
+                return true;
+            } else {
+                log.debug("Progressive encoding is only supported for JPEGs. Mime type: {}", mimeType);
+                return false;
+            }
+        } else {
+            return false;
+        }
     }
 
     @Activate
     protected final void activate(final Map<String, String> properties) throws Exception {
         final String regex = PropertiesUtil.toString(properties.get(PROP_ASSET_RENDITION_PICKER_REGEX),
                 DEFAULT_ASSET_RENDITION_PICKER_REGEX);
-	    final String fileNameRegex = PropertiesUtil.toString(properties.get(NAMED_IMAGE_FILENAME_PATTERN),
-			    DEFAULT_FILENAME_PATTERN);
-	    if(StringUtils.isNotEmpty(fileNameRegex)) {
-		    lastSuffixPattern = Pattern.compile(fileNameRegex);
-	    }
+        final String fileNameRegex = PropertiesUtil.toString(properties.get(NAMED_IMAGE_FILENAME_PATTERN),
+                DEFAULT_FILENAME_PATTERN);
+        if(StringUtils.isNotEmpty(fileNameRegex)) {
+            lastSuffixPattern = Pattern.compile(fileNameRegex);
+        }
         try {
             renditionPatternPicker = new RenditionPatternPicker(regex);
             log.info("Asset Rendition Pattern Picker: {}", regex);

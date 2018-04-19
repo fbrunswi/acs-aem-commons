@@ -17,12 +17,13 @@
  * limitations under the License.
  * #L%
  */
-package com.adobe.acs.commons.httpcache.config.impl;
+    package com.adobe.acs.commons.httpcache.config.impl;
 
 import com.adobe.acs.commons.httpcache.config.HttpCacheConfig;
 import com.adobe.acs.commons.httpcache.config.HttpCacheConfigExtension;
 import com.adobe.acs.commons.httpcache.exception.HttpCacheKeyCreationException;
 import com.adobe.acs.commons.httpcache.exception.HttpCacheRepositoryAccessException;
+import com.adobe.acs.commons.httpcache.keys.AbstractCacheKey;
 import com.adobe.acs.commons.httpcache.keys.CacheKey;
 import com.adobe.acs.commons.httpcache.keys.CacheKeyFactory;
 import com.adobe.acs.commons.httpcache.util.UserUtils;
@@ -30,8 +31,14 @@ import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.lang.builder.EqualsBuilder;
 import org.apache.commons.lang.builder.HashCodeBuilder;
-import org.apache.felix.scr.annotations.*;
+import org.apache.felix.scr.annotations.Activate;
+import org.apache.felix.scr.annotations.Component;
+import org.apache.felix.scr.annotations.ConfigurationPolicy;
+import org.apache.felix.scr.annotations.Modified;
 import org.apache.felix.scr.annotations.Properties;
+import org.apache.felix.scr.annotations.Property;
+import org.apache.felix.scr.annotations.PropertyUnbounded;
+import org.apache.felix.scr.annotations.Service;
 import org.apache.jackrabbit.api.security.user.User;
 import org.apache.sling.api.SlingHttpServletRequest;
 import org.apache.sling.commons.osgi.PropertiesUtil;
@@ -39,7 +46,16 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.jcr.RepositoryException;
-import java.util.*;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.ListIterator;
+import java.util.Map;
 
 /**
  * Implementation for custom cache config extension and associated cache key creation based on aem groups. This cache
@@ -47,8 +63,8 @@ import java.util.*;
  * user's group membership list. Made it as config factory as it could move along 1-1 with HttpCacheConfig.
  */
 @Component(label = "ACS AEM Commons - HTTP Cache - Group based extension for HttpCacheConfig and CacheKeyFactory.",
-           description = "HttpCacheConfig custom extension for group based configuration and associated cache key " +
-                   "creation.",
+           description = "HttpCacheConfig custom extension for group based configuration and associated cache key "
+                   + "creation.",
            metatype = true,
            configurationFactory = true,
            policy = ConfigurationPolicy.REQUIRE
@@ -114,8 +130,13 @@ public class GroupHttpCacheConfigExtension implements HttpCacheConfigExtension, 
     @Override
     public CacheKey build(final SlingHttpServletRequest slingHttpServletRequest, final HttpCacheConfig cacheConfig)
             throws HttpCacheKeyCreationException {
-
         return new GroupCacheKey(slingHttpServletRequest, cacheConfig);
+    }
+
+    @Override
+    public CacheKey build(final String resourcePath, final HttpCacheConfig cacheConfig)
+            throws HttpCacheKeyCreationException {
+        return new GroupCacheKey(resourcePath, cacheConfig);
     }
 
     @Override
@@ -132,67 +153,74 @@ public class GroupHttpCacheConfigExtension implements HttpCacheConfigExtension, 
     /**
      * The GroupCacheKey is a custom CacheKey bound to this particular factory.
      */
-    class GroupCacheKey implements CacheKey {
+    class GroupCacheKey extends AbstractCacheKey implements CacheKey, Serializable {
 
         /* This key is composed of uri, list of user groups and authentication requirement details */
-        private String uri;
         private List<String> cacheKeyUserGroups;
-        private String authenticationRequirement;
 
         public GroupCacheKey(SlingHttpServletRequest request, HttpCacheConfig cacheConfig) throws
                 HttpCacheKeyCreationException {
 
-            this.uri = request.getRequestURI();
+            super(request, cacheConfig);
             this.cacheKeyUserGroups = userGroups;
-            this.authenticationRequirement = cacheConfig.getAuthenticationRequirement();
         }
 
         public GroupCacheKey(String uri, HttpCacheConfig cacheConfig) throws HttpCacheKeyCreationException {
-
-            this.uri = uri;
-            // Note - Custom attribute in this case is user group names.
+            super(uri, cacheConfig);
             this.cacheKeyUserGroups = userGroups;
-            this.authenticationRequirement = cacheConfig.getAuthenticationRequirement();
         }
 
         @Override
         public boolean equals(Object o) {
-
-            if (this == o) {
-                return true;
+            if (!super.equals(o)) {
+                return false;
             }
 
-            if (o == null || getClass() != o.getClass()) {
+            if (o == null) {
                 return false;
             }
 
             GroupCacheKey that = (GroupCacheKey) o;
 
-            return new EqualsBuilder().append(uri, that.uri).append(cacheKeyUserGroups, that.cacheKeyUserGroups)
-                    .append(authenticationRequirement, that.authenticationRequirement).isEquals();
+            return new EqualsBuilder()
+                    .append(getUri(), that.getUri())
+                    .append(cacheKeyUserGroups, that.cacheKeyUserGroups)
+                    .append(getAuthenticationRequirement(), that.getAuthenticationRequirement())
+                    .isEquals();
         }
 
         @Override
         public int hashCode() {
-
-            return new HashCodeBuilder(17, 37).append(uri).append(cacheKeyUserGroups).append
-                    (authenticationRequirement).toHashCode();
+            return new HashCodeBuilder(17, 37)
+                    .append(getUri())
+                    .append(cacheKeyUserGroups)
+                    .append(getAuthenticationRequirement()).toHashCode();
         }
 
         @Override
         public String toString() {
-
-            StringBuilder formattedString = new StringBuilder(this.uri.replace('/', '_')).append("_");
-            for (String userGroup : cacheKeyUserGroups) {
-                formattedString.append(userGroup).append("_");
-            }
-            formattedString.append(authenticationRequirement);
+            StringBuilder formattedString = new StringBuilder(this.uri).append(" [GROUPS:");
+            formattedString.append(StringUtils.join(cacheKeyUserGroups, "|"));
+            formattedString.append("] [AUTH_REQ:" + getAuthenticationRequirement() + "]");
             return formattedString.toString();
         }
 
-        @Override
-        public String getUri() {
-            return this.uri;
+        /** For Serialization **/
+        private void writeObject(ObjectOutputStream o) throws IOException
+        {
+            parentWriteObject(o);
+            final Object[] userGroupArray = cacheKeyUserGroups.toArray();
+            o.writeObject(StringUtils.join(userGroupArray, ","));
+        }
+
+        /** For De serialization **/
+        private void readObject(ObjectInputStream o)
+                throws IOException, ClassNotFoundException {
+
+            parentReadObject(o);
+            final String userGroupsStr = (String) o.readObject();
+            final String[] userGroupStrArray = userGroupsStr.split(",");
+            cacheKeyUserGroups = Arrays.asList(userGroupStrArray);
         }
     }
 

@@ -29,15 +29,19 @@ import org.apache.commons.mail.Email;
 import org.apache.commons.mail.EmailException;
 import org.apache.commons.mail.HtmlEmail;
 import org.apache.commons.mail.SimpleEmail;
+import org.apache.felix.scr.annotations.Activate;
 import org.apache.felix.scr.annotations.Component;
+import org.apache.felix.scr.annotations.Property;
 import org.apache.felix.scr.annotations.Reference;
 import org.apache.felix.scr.annotations.Service;
 import org.apache.sling.api.resource.LoginException;
 import org.apache.sling.api.resource.ResourceResolver;
 import org.apache.sling.api.resource.ResourceResolverFactory;
+import org.apache.sling.commons.osgi.PropertiesUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.activation.DataSource;
 import javax.jcr.Session;
 import javax.mail.MessagingException;
 import javax.mail.internet.AddressException;
@@ -51,18 +55,52 @@ import java.util.Map;
 /**
  * ACS AEM Commons - E-mail Service
  * A Generic Email service that sends an email to a given list of recipients.
+ *
+ * The mailType is set to HTMLEmail by default if there are any attachments. Since we are using
+ * the template to determine the mailType, the template name has to be *.html.
+ *
+ * Here is an example to send an email with attachments:
+ *
+ *      String attachment1 = "This text should be in the attache txt file."
+ *      Map<String, DataSource> attachments = new HashMap<>();
+ *      attachments.put("attachment1.txt", new ByteArrayDataSource(attachment1, "text/plain"));
+ *      ...
+ *      ...
+ *      List<String> participantList = emailService.sendEmail(htmlEmailTemplatePath, emailParams, attachments, key);
  */
-@Component
+@Component(metatype = true, label = "ACS AEM Commons - Email Service", description = "ACS AEM Commons - Email Service")
 @Service
 public final class EmailServiceImpl implements EmailService {
 
     private static final Logger log = LoggerFactory.getLogger(EmailServiceImpl.class);
+    private static final String MSG_INVALID_RECIPIENTS = "Invalid Recipients";
 
     @Reference
     private MessageGatewayService messageGatewayService;
 
     @Reference
     private ResourceResolverFactory resourceResolverFactory;
+
+    public static final int DEFAULT_CONNECT_TIMEOUT = 30000;
+
+    public static final int DEFAULT_SOCKET_TIMEOUT = 30000;
+
+    @Property(label = "Socket Timeout", description = "Socket timeout in milliseconds", intValue = DEFAULT_SOCKET_TIMEOUT)
+    private static final String PROP_SO_TIMEOUT = "so.timeout";
+
+    @Property(label = "Connect Timeout", description = "Connect timeout in milliseconds", intValue = DEFAULT_CONNECT_TIMEOUT)
+    private static final String PROP_CONNECT_TIMEOUT = "conn.timeout";
+
+    private static String SERVICE_NAME = "email-service";
+
+    private int connectTimeout;
+    private int soTimeout;
+
+    @Activate
+    protected void activate(Map<String, Object> config) {
+        connectTimeout = PropertiesUtil.toInteger(config.get(PROP_CONNECT_TIMEOUT), DEFAULT_CONNECT_TIMEOUT);
+        soTimeout = PropertiesUtil.toInteger(config.get(PROP_SO_TIMEOUT), DEFAULT_SOCKET_TIMEOUT);
+    }
 
     @Override
     public List<String> sendEmail(final String templatePath,
@@ -72,7 +110,7 @@ public final class EmailServiceImpl implements EmailService {
         List<String> failureList = new ArrayList<String>();
 
         if (recipients == null || recipients.length <= 0) {
-            throw new IllegalArgumentException("Invalid Recipients");
+            throw new IllegalArgumentException(MSG_INVALID_RECIPIENTS);
         }
 
         List<InternetAddress> addresses = new ArrayList<InternetAddress>(recipients.length);
@@ -101,7 +139,7 @@ public final class EmailServiceImpl implements EmailService {
         List<InternetAddress> failureList = new ArrayList<InternetAddress>();
 
         if (recipients == null || recipients.length <= 0) {
-            throw new IllegalArgumentException("Invalid Recipients");
+            throw new IllegalArgumentException(MSG_INVALID_RECIPIENTS);
         }
 
         final MailTemplate mailTemplate = this.getMailTemplate(templatePath);
@@ -123,6 +161,72 @@ public final class EmailServiceImpl implements EmailService {
         return failureList;
     }
 
+    @Override
+    public List<InternetAddress> sendEmail(String templatePath, Map<String, String> emailParams, Map<String, DataSource> attachments, InternetAddress... recipients) {
+
+        List<InternetAddress> failureList = new ArrayList<InternetAddress>();
+
+        if (recipients == null || recipients.length <= 0) {
+            throw new IllegalArgumentException(MSG_INVALID_RECIPIENTS);
+        }
+
+        final MailTemplate mailTemplate = this.getMailTemplate(templatePath);
+        final Class<? extends Email> mailType;
+        if (attachments != null && attachments.size() > 0) {
+            mailType = HtmlEmail.class;
+        } else {
+            mailType = this.getMailType(templatePath);
+        }
+        final MessageGateway<Email> messageGateway = messageGatewayService.getGateway(mailType);
+
+        for (final InternetAddress address : recipients) {
+            try {
+                // Get a new email per recipient to avoid duplicate attachments
+                Email email = getEmail(mailTemplate, mailType, emailParams);
+                email.setTo(Collections.singleton(address));
+
+                if (attachments != null && attachments.size() > 0) {
+                    for (Map.Entry<String, DataSource> entry : attachments.entrySet()) {
+                        ((HtmlEmail) email).attach(entry.getValue(), entry.getKey(), null);
+                    }
+                }
+
+                messageGateway.send(email);
+            } catch (Exception e) {
+                failureList.add(address);
+                log.error("Error sending email to [ " + address + " ]", e);
+            }
+        }
+
+        return failureList;
+    }
+
+    @Override
+    public List<String> sendEmail(String templatePath, Map<String, String> emailParams, Map<String, DataSource> attachments, String... recipients) {
+        List<String> failureList = new ArrayList<String>();
+
+        if (recipients == null || recipients.length <= 0) {
+            throw new IllegalArgumentException(MSG_INVALID_RECIPIENTS);
+        }
+
+        List<InternetAddress> addresses = new ArrayList<InternetAddress>(recipients.length);
+        for (String recipient : recipients) {
+            try {
+                addresses.add(new InternetAddress(recipient));
+            } catch (AddressException e) {
+                log.warn("Invalid email address {} passed to sendEmail(). Skipping.", recipient);
+            }
+        }
+        InternetAddress[] iAddressRecipients = addresses.toArray(new InternetAddress[addresses.size()]);
+        List<InternetAddress> failureInternetAddresses = sendEmail(templatePath, emailParams, attachments, iAddressRecipients);
+
+        for (InternetAddress address : failureInternetAddresses) {
+            failureList.add(address.toString());
+        }
+
+        return failureList;
+    }
+
     private Email getEmail(final MailTemplate mailTemplate,
                            final Class<? extends Email> mailType,
                            final Map<String, String> params) throws EmailException, MessagingException, IOException {
@@ -139,6 +243,17 @@ public final class EmailServiceImpl implements EmailService {
         } else if (params.containsKey(EmailServiceConstants.SENDER_EMAIL_ADDRESS)) {
             email.setFrom(params.get(EmailServiceConstants.SENDER_EMAIL_ADDRESS));
         }
+        if (connectTimeout > 0) {
+            email.setSocketConnectionTimeout(connectTimeout);
+        }
+        if (soTimeout > 0) {
+            email.setSocketTimeout(soTimeout);
+        }
+
+        // #1008 setting the subject via the setSubject(..) parameter.
+        if (params.containsKey(EmailServiceConstants.SUBJECT)) {
+            email.setSubject(params.get(EmailServiceConstants.SUBJECT));
+        }
 
         return email;
     }
@@ -151,7 +266,8 @@ public final class EmailServiceImpl implements EmailService {
         MailTemplate mailTemplate = null;
         ResourceResolver resourceResolver = null;
         try {
-            resourceResolver = resourceResolverFactory.getAdministrativeResourceResolver(null);
+            Map<String, Object> authInfo = Collections.singletonMap(ResourceResolverFactory.SUBSERVICE, (Object) SERVICE_NAME);
+            resourceResolver = resourceResolverFactory.getServiceResourceResolver(authInfo);
             mailTemplate = MailTemplate.create(templatePath, resourceResolver.adaptTo(Session.class));
 
             if (mailTemplate == null) {
@@ -160,7 +276,7 @@ public final class EmailServiceImpl implements EmailService {
             }
         } catch (LoginException e) {
             log.error("Unable to obtain an administrative resource resolver to get the Mail Template at [ "
-                            + templatePath + " ]", e);
+                    + templatePath + " ]", e);
         } finally {
             if (resourceResolver != null) {
                 resourceResolver.close();

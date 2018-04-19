@@ -27,12 +27,19 @@ import org.apache.commons.io.IOUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Value for cache item in mem store.
  */
 class MemCachePersistenceObject {
+    /** Response status **/
+    private int status;
     /** Response character encoding */
     private String charEncoding;
     /** Response content type */
@@ -41,6 +48,7 @@ class MemCachePersistenceObject {
     Multimap<String, String> headers;
     /** Byte array to hold the data from the stream */
     private byte[] bytes;
+    AtomicInteger count = new AtomicInteger(0);
 
     /**
      * Create <code>MemCachePersistenceObject</code>. Use <code>buildForCaching</code> method to initialize parameters.
@@ -58,9 +66,10 @@ class MemCachePersistenceObject {
      * @param dataInputStream
      * @throws HttpCacheDataStreamException
      */
-    public MemCachePersistenceObject buildForCaching(String charEncoding, String contentType, Map<String,
+    public MemCachePersistenceObject buildForCaching(int status, String charEncoding, String contentType, Map<String,
             List<String>> headers, InputStream dataInputStream) throws HttpCacheDataStreamException {
 
+        this.status = status;
         this.charEncoding = charEncoding;
         this.contentType = contentType;
 
@@ -68,7 +77,10 @@ class MemCachePersistenceObject {
         this.headers = HashMultimap.create();
         for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
             for (String value : entry.getValue()) {
-                this.headers.put(entry.getKey(), value);
+                if (!"Sling-Tracer-Protocol-Version".equals(entry.getKey()) && !"Sling-Tracer-Request-Id".equals(entry.getKey())) {
+                    // Do NOT cache Sling Tracer headers as this makes debugging difficult and confusing!
+                    this.headers.put(entry.getKey(), value);
+                }
             }
         }
 
@@ -78,7 +90,16 @@ class MemCachePersistenceObject {
         } catch (IOException e) {
             throw new HttpCacheDataStreamException("Unable to get byte array out of stream", e);
         }
+
         return this;
+    }
+
+    /**
+     * Get response status
+     * @return the status code
+     */
+    public int getStatus() {
+        return status;
     }
 
     /**
@@ -124,5 +145,20 @@ class MemCachePersistenceObject {
      */
     public byte[] getBytes() {
         return bytes;
+    }
+
+
+    /**
+     * Increments the hit for this cache entry.
+     */
+    public void incrementHitCount() {
+        count.incrementAndGet();
+    }
+
+    /**
+     * @return the number of times this cache entry has been requested
+     */
+    public int getHitCount() {
+        return count.get();
     }
 }

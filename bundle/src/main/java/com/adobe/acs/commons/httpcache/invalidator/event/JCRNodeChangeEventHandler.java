@@ -20,7 +20,12 @@
 package com.adobe.acs.commons.httpcache.invalidator.event;
 
 import com.adobe.acs.commons.httpcache.invalidator.CacheInvalidationJobConstants;
-import org.apache.felix.scr.annotations.*;
+import org.apache.felix.scr.annotations.Component;
+import org.apache.felix.scr.annotations.ConfigurationPolicy;
+import org.apache.felix.scr.annotations.Properties;
+import org.apache.felix.scr.annotations.Property;
+import org.apache.felix.scr.annotations.Reference;
+import org.apache.felix.scr.annotations.Service;
 import org.apache.sling.api.SlingConstants;
 import org.apache.sling.event.jobs.JobManager;
 import org.osgi.service.event.Event;
@@ -54,10 +59,10 @@ import java.util.Map;
                    name = EventConstants.EVENT_TOPIC,
                    propertyPrivate = true),
         @Property(label = "JCR paths to watch for changes.",
-                  value = "(|(" + SlingConstants.PROPERTY_PATH + "=" +
-                          "/content*)(" + SlingConstants.PROPERTY_PATH + "=" + "/etc*))",
-                  description = "Paths expressed in LDAP syntax. Example: (|(path=/content*)(path=/etc*))" +
-                          " - Watches for changes under /content or /etc. ",
+                  value = "(|(" + SlingConstants.PROPERTY_PATH + "="
+                          + "/content*)(" + SlingConstants.PROPERTY_PATH + "=" + "/etc*))",
+                  description = "Paths expressed in LDAP syntax. Example: (|(path=/content*)(path=/etc*))"
+                          + " - Watches for changes under /content or /etc. ",
                   name = EventConstants.EVENT_FILTER),
         @Property(name = "webconsole.configurationFactory.nameHint",
                     value = "JCR paths to watch for changes: {" + EventConstants.EVENT_FILTER + "}",

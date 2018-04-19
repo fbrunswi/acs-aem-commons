@@ -48,7 +48,7 @@ import com.day.cq.wcm.api.reference.ReferenceProvider;
  * ACS AEM Commons - Pages Reference Provider
  * Reference provider that searches for  pages referenced inside any given page resource
  */
-@Component(policy = ConfigurationPolicy.REQUIRE)
+@Component(policy = ConfigurationPolicy.REQUIRE, metatype = true, label = "ACS AEM Commons - Pages Reference Provider", description = "ACS AEM Commons - Pages Reference Provider")
 @Service
 public final class PagesReferenceProvider implements ReferenceProvider {
 
@@ -87,7 +87,10 @@ public final class PagesReferenceProvider implements ReferenceProvider {
         search(resource, pages, pageManager);
 
         for (Page page: pages) {
-            references.add(getReference(page));
+            Resource contentResource = page.getContentResource();
+            if (contentResource != null && !contentResource.getPath().equals(resource.getPath())) {
+                references.add(getReference(page));
+            }
         }
 
         return references;
@@ -102,17 +105,25 @@ public final class PagesReferenceProvider implements ReferenceProvider {
 
     private void findReferencesInResource(Resource resource,
             Set<Page> pages, PageManager pageManager) {
-        ValueMap map = resource.adaptTo(ValueMap.class);
-        for (String key : map.keySet()) {
-            String[] values = map.get(key, new String[0]);
-            for (String value : values) {
-                if (pattern.matcher(value).find()) {
-                    for (String path : getAllPathsInAProperty(value)) {
-                        Page page = pageManager.getContainingPage(path);
-                        if (page != null) {
-                            pages.add(page);
-                        }
-                    }
+        ValueMap map = resource.getValueMap();
+        for (Object value : map.values()) {
+            if (value instanceof String) {
+                String strValue = (String) value;
+                addPagesFromPropertyValue(strValue, pages, pageManager);
+            } else if (value instanceof String[]) {
+                for (String strValue : (String[]) value) {
+                    addPagesFromPropertyValue(strValue, pages, pageManager);
+                }
+            }
+        }
+    }
+
+    private void addPagesFromPropertyValue(String strValue, Set<Page> pages, PageManager pageManager) {
+        if (pattern.matcher(strValue).find()) {
+            for (String path : getAllPathsInAProperty(strValue)) {
+                Page page = pageManager.getContainingPage(path);
+                if (page != null) {
+                    pages.add(page);
                 }
             }
         }
@@ -121,7 +132,7 @@ public final class PagesReferenceProvider implements ReferenceProvider {
     private Reference getReference(Page page) {
         return new Reference(TYPE_PAGE,
                 String.format("%s (Page)", page.getName()),
-                page.getContentResource(),
+                page.getContentResource().getParent(),
                 getLastModifiedTimeOfResource(page));
     }
 

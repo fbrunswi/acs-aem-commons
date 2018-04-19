@@ -27,11 +27,20 @@ import com.adobe.acs.commons.httpcache.keys.CacheKey;
 import com.adobe.acs.commons.httpcache.store.HttpCacheStore;
 import com.adobe.acs.commons.httpcache.store.TempSink;
 import com.adobe.acs.commons.util.impl.AbstractGuavaCacheMBean;
-import com.google.common.cache.*;
+import com.adobe.acs.commons.util.impl.exception.CacheMBeanException;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.RemovalListener;
+import com.google.common.cache.RemovalNotification;
+import com.google.common.cache.Weigher;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang.StringUtils;
-import org.apache.felix.scr.annotations.*;
+import org.apache.felix.scr.annotations.Activate;
+import org.apache.felix.scr.annotations.Component;
+import org.apache.felix.scr.annotations.Deactivate;
+import org.apache.felix.scr.annotations.Properties;
+import org.apache.felix.scr.annotations.Property;
+import org.apache.felix.scr.annotations.Service;
 import org.apache.sling.commons.osgi.PropertiesUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,8 +51,8 @@ import javax.management.openmbean.CompositeType;
 import javax.management.openmbean.OpenDataException;
 import javax.management.openmbean.OpenType;
 import javax.management.openmbean.SimpleType;
-
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
@@ -62,8 +71,8 @@ import java.util.concurrent.TimeUnit;
                     value = "com.adobe.acs.httpcache:type=In Memory HTTP Cache Store",
                     propertyPrivate = true),
         @Property(name = "webconsole.configurationFactory.nameHint",
-                    value = "TTL: {httpcache.cachestore.memcache.ttl}, " +
-                            "Max size in MB: {httpcache.cachestore.memcache.maxsize}",
+                    value = "TTL: {httpcache.cachestore.memcache.ttl}, "
+                            + "Max size in MB: {httpcache.cachestore.memcache.maxsize}",
                     propertyPrivate = true)
 })
 @Service(value = {DynamicMBean.class, HttpCacheStore.class})
@@ -81,8 +90,8 @@ public class MemHttpCacheStoreImpl extends AbstractGuavaCacheMBean<CacheKey, Mem
     private long ttl;
 
     @Property(label = "Maximum size of this store in MB",
-              description = "Default to 10MB. If cache size goes beyond this size, least used entry will be evicted " +
-                      "" + "from the cache",
+              description = "Default to 10MB. If cache size goes beyond this size, least used entry will be evicted "
+                      + "from the cache",
               longValue = MemHttpCacheStoreImpl.DEFAULT_MAX_SIZE_IN_MB)
     private static final String PROP_MAX_SIZE_IN_MB = "httpcache.cachestore.memcache.maxsize";
     private static final long DEFAULT_MAX_SIZE_IN_MB = 10L; // Defaults to 10MB.
@@ -106,12 +115,21 @@ public class MemHttpCacheStoreImpl extends AbstractGuavaCacheMBean<CacheKey, Mem
         }
         if (ttl != DEFAULT_TTL) {
             // If ttl is present, attach it to guava cache configuration.
-            cache = CacheBuilder.newBuilder().maximumWeight(maxSizeInMb * MEGABYTE).expireAfterWrite(ttl, TimeUnit
-                    .SECONDS).removalListener(new MemCacheEntryRemovalListener()).recordStats().build();
+            cache = CacheBuilder.newBuilder()
+                    .maximumWeight(maxSizeInMb * MEGABYTE)
+                    .weigher(new MemCacheEntryWeigher())
+                    .expireAfterWrite(ttl, TimeUnit.SECONDS)
+                    .removalListener(new MemCacheEntryRemovalListener())
+                    .recordStats()
+                    .build();
         } else {
             // If ttl is absent, go only with the maximum weight condition.
-            cache = CacheBuilder.newBuilder().maximumWeight(maxSizeInMb * MEGABYTE).weigher(new MemCacheEntryWeigher
-                    ()).removalListener(new MemCacheEntryRemovalListener()).recordStats().build();
+            cache = CacheBuilder.newBuilder()
+                    .maximumWeight(maxSizeInMb * MEGABYTE)
+                    .weigher(new MemCacheEntryWeigher())
+                    .removalListener(new MemCacheEntryRemovalListener())
+                    .recordStats()
+                    .build();
         }
 
         log.info("MemHttpCacheStoreImpl activated / modified.");
@@ -151,14 +169,14 @@ public class MemHttpCacheStoreImpl extends AbstractGuavaCacheMBean<CacheKey, Mem
     //-------------------------<CacheStore interface specific implementation>
     @Override
     public void put(CacheKey key, CacheContent content) throws HttpCacheDataStreamException {
-        cache.put(key, new MemCachePersistenceObject().buildForCaching(content.getCharEncoding(), content
-                .getContentType(), content.getHeaders(), content.getInputDataStream()));
+        cache.put(key, new MemCachePersistenceObject().buildForCaching(content.getStatus(), content.getCharEncoding(),
+                content.getContentType(), content.getHeaders(), content.getInputDataStream()));
 
     }
 
     @Override
     public boolean contains(CacheKey key) {
-        if (null == this.getIfPresent(key)) {
+        if (null == cache.getIfPresent(key)) {
             return false;
         }
         return true;
@@ -170,7 +188,11 @@ public class MemHttpCacheStoreImpl extends AbstractGuavaCacheMBean<CacheKey, Mem
         if (null == value) {
             return null;
         }
-        return new CacheContent(value.getCharEncoding(), value.getContentType(), value.getHeaders(), new
+
+        // Increment hit count
+        value.incrementHitCount();
+
+        return new CacheContent(value.getStatus(), value.getCharEncoding(), value.getContentType(), value.getHeaders(), new
                 ByteArrayInputStream(value.getBytes()));
     }
 
@@ -180,13 +202,14 @@ public class MemHttpCacheStoreImpl extends AbstractGuavaCacheMBean<CacheKey, Mem
     }
 
     @Override
-    public void invalidate(CacheKey key) {
-        cache.invalidate(key);
-    }
+    public void invalidate(CacheKey invalidationKey) {
+        final ConcurrentMap<CacheKey, MemCachePersistenceObject> cacheAsMap = cache.asMap();
 
-    @Override
-    public void invalidateAll() {
-        cache.invalidateAll();
+        for (CacheKey key : cacheAsMap.keySet()) {
+            if (key.isInvalidatedBy(invalidationKey)) {
+                cache.invalidate(key);
+            }
+        }
     }
 
     @Override
@@ -204,6 +227,11 @@ public class MemHttpCacheStoreImpl extends AbstractGuavaCacheMBean<CacheKey, Mem
                 this.invalidateAll();
             }
         }
+    }
+
+    @Override
+    public void invalidateAll() {
+        cache.invalidateAll();
     }
 
     @Override
@@ -234,25 +262,37 @@ public class MemHttpCacheStoreImpl extends AbstractGuavaCacheMBean<CacheKey, Mem
     }
 
     @Override
+    @SuppressWarnings("squid:S1192")
     protected void addCacheData(Map<String, Object> data, MemCachePersistenceObject cacheObj) {
-        data.put("Size", FileUtils.byteCountToDisplaySize(cacheObj.getBytes().length));
-        data.put("Content Type", cacheObj.getContentType());
-        data.put("Character Encoding", cacheObj.getCharEncoding());
+        int hitCount = cacheObj.getHitCount();
+        long size = cacheObj.getBytes().length;
+        data.put(JMX_PN_STATUS, cacheObj.getStatus());
+        data.put(JMX_PN_SIZE, FileUtils.byteCountToDisplaySize(size));
+        data.put(JMX_PN_CONTENTTYPE, cacheObj.getContentType());
+        data.put(JMX_PN_CHARENCODING, cacheObj.getCharEncoding());
+        data.put(JMX_PN_HITS, hitCount);
+        data.put(JMX_PN_TOTALSIZESERVED, FileUtils.byteCountToDisplaySize(hitCount * size));
+
     }
 
     @Override
-    protected String toString(MemCachePersistenceObject cacheObj) throws Exception{
-        return IOUtils.toString(
-                new ByteArrayInputStream(cacheObj.getBytes()),
-                cacheObj.getCharEncoding());
+    protected String toString(MemCachePersistenceObject cacheObj) throws CacheMBeanException{
+        try {
+            return IOUtils.toString(
+                    new ByteArrayInputStream(cacheObj.getBytes()),
+                    cacheObj.getCharEncoding());
+        } catch (IOException e) {
+            throw new CacheMBeanException("Error getting the content from the cacheObject", e);
+        }
     }
 
     @Override
+    @SuppressWarnings("squid:S1192")
     protected CompositeType getCacheEntryType() throws OpenDataException {
-       return new CompositeType("Cache Entry", "Cache Entry",
-                new String[] { "Cache Key", "Size", "Content Type", "Character Encoding" },
-                new String[] { "Cache Key", "Size", "Content Type", "Character Encoding" },
-                new OpenType[] { SimpleType.STRING, SimpleType.STRING, SimpleType.STRING, SimpleType.STRING });
+       return new CompositeType(JMX_PN_CACHEENTRY, JMX_PN_CACHEENTRY,
+                new String[] { JMX_PN_CACHEKEY, JMX_PN_STATUS, JMX_PN_SIZE, JMX_PN_CONTENTTYPE, JMX_PN_CHARENCODING, JMX_PN_HITS, JMX_PN_TOTALSIZESERVED },
+                new String[] { JMX_PN_CACHEKEY, JMX_PN_STATUS, JMX_PN_SIZE, JMX_PN_CONTENTTYPE, JMX_PN_CHARENCODING, JMX_PN_HITS, JMX_PN_TOTALSIZESERVED },
+                new OpenType[] { SimpleType.STRING, SimpleType.INTEGER, SimpleType.STRING, SimpleType.STRING, SimpleType.STRING, SimpleType.INTEGER, SimpleType.STRING });
 
     }
 

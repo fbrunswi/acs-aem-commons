@@ -21,12 +21,12 @@ package com.adobe.acs.commons.twitter.impl;
 
 import java.util.Map;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.lang.StringUtils;
 import org.apache.felix.scr.annotations.Activate;
 import org.apache.felix.scr.annotations.Component;
 import org.apache.felix.scr.annotations.Properties;
 import org.apache.felix.scr.annotations.Property;
-import org.apache.felix.scr.annotations.Reference;
 import org.apache.felix.scr.annotations.Service;
 import org.apache.sling.api.adapter.AdapterFactory;
 import org.apache.sling.api.resource.Resource;
@@ -55,11 +55,13 @@ import com.day.cq.wcm.webservicesupport.ConfigurationManager;
                 "com.day.cq.wcm.webservicesupport.Configuration" }, propertyPrivate = true),
         @Property(name = AdapterFactory.ADAPTER_CLASSES, value = { "twitter4j.Twitter",
                 "com.adobe.acs.commons.twitter.TwitterClient" }, propertyPrivate = true) })
-public final class TwitterAdapterFactory implements AdapterFactory {
+public class TwitterAdapterFactory implements AdapterFactory {
 
     private static final String CLOUD_SERVICE_NAME = "twitterconnect";
 
     private static final Logger log = LoggerFactory.getLogger(TwitterAdapterFactory.class);
+
+    private static final boolean DEFAULT_USE_SSL = true;
 
     @Property(label = "HTTP Proxy Host", description = "HTTP Proxy Host, leave blank for none")
     private static final String PROP_HTTP_PROXY_HOST = "http.proxy.host";
@@ -67,8 +69,8 @@ public final class TwitterAdapterFactory implements AdapterFactory {
     @Property(label = "HTTP Proxy Port", description = "HTTP Proxy Port, leave 0 for none", intValue = 0)
     private static final String PROP_HTTP_PROXY_PORT = "http.proxy.port";
 
-    @Reference
-    private ConfigurationManager configurationManager;
+    @Property(label = "Use SSL", description = "Use SSL Connections", boolValue = DEFAULT_USE_SSL)
+    private static final String PROP_USE_SSL = "use.ssl";
 
     private TwitterFactory factory;
 
@@ -76,14 +78,16 @@ public final class TwitterAdapterFactory implements AdapterFactory {
 
     private int httpProxyPort;
 
+    private boolean useSsl;
+
     @SuppressWarnings("unchecked")
     @Override
     public <AdapterType> AdapterType getAdapter(Object adaptable, Class<AdapterType> type) {
         TwitterClient client = null;
         if (adaptable instanceof Page) {
-            client = createTwitterClient((Page) adaptable);
+            client = createTwitterClientFromPage((Page) adaptable);
         } else if (adaptable instanceof com.day.cq.wcm.webservicesupport.Configuration) {
-            client = createTwitterClient((com.day.cq.wcm.webservicesupport.Configuration) adaptable);
+            client = createTwitterClientFromConfiguration((com.day.cq.wcm.webservicesupport.Configuration) adaptable);
         }
 
         if (client != null) {
@@ -99,7 +103,7 @@ public final class TwitterAdapterFactory implements AdapterFactory {
 
     private Configuration buildConfiguration() {
         final ConfigurationBuilder builder = new ConfigurationBuilder();
-        builder.setUseSSL(true);
+        builder.setUseSSL(useSsl);
         builder.setJSONStoreEnabled(true);
         builder.setApplicationOnlyAuthEnabled(true);
         if (StringUtils.isNotBlank(httpProxyHost) && httpProxyPort > 0) {
@@ -109,19 +113,19 @@ public final class TwitterAdapterFactory implements AdapterFactory {
         return builder.build();
     }
 
-    private TwitterClient createTwitterClient(com.day.cq.wcm.webservicesupport.Configuration config) {
+    private TwitterClient createTwitterClientFromConfiguration(com.day.cq.wcm.webservicesupport.Configuration config) {
         Resource oauthConfig = config.getContentResource().listChildren().next();
         ValueMap oauthProps = oauthConfig.getValueMap();
         String consumerKey = oauthProps.get("oauth.client.id", String.class);
         String consumerSecret = oauthProps.get("oauth.client.secret", String.class);
 
         if (consumerKey != null && consumerSecret != null) {
-            Twitter t = factory.getInstance();
+            Twitter twitter = getInstance();
             log.debug("Creating client for key {}.", consumerKey);
-            t.setOAuthConsumer(consumerKey, consumerSecret);
+            twitter.setOAuthConsumer(consumerKey, consumerSecret);
             try {
-                t.getOAuth2Token();
-                return new TwitterClientImpl(t, config);
+                twitter.getOAuth2Token();
+                return new TwitterClientImpl(twitter, config);
             } catch (TwitterException e) {
                 log.error("Unable to create Twitter client.", e);
                 return null;
@@ -133,28 +137,35 @@ public final class TwitterAdapterFactory implements AdapterFactory {
         return null;
     }
 
-    private TwitterClient createTwitterClient(Page page) {
+    @VisibleForTesting
+    Twitter getInstance() {
+        return factory.getInstance();
+    }
+
+    private TwitterClient createTwitterClientFromPage(Page page) {
         com.day.cq.wcm.webservicesupport.Configuration config = findTwitterConfiguration(page);
         if (config != null) {
-            return createTwitterClient(config);
+            return createTwitterClientFromConfiguration(config);
         }
         return null;
     }
 
     private com.day.cq.wcm.webservicesupport.Configuration findTwitterConfiguration(Page page) {
+        ConfigurationManager configurationManager = page.getContentResource().getResourceResolver().adaptTo(ConfigurationManager.class);
+
         final HierarchyNodeInheritanceValueMap pageProperties = new HierarchyNodeInheritanceValueMap(
                 page.getContentResource());
         final String[] services = pageProperties.getInherited(ConfigurationConstants.PN_CONFIGURATIONS,
                 new String[0]);
-        final com.day.cq.wcm.webservicesupport.Configuration cfg = configurationManager.getConfiguration(
+        return configurationManager.getConfiguration(
                 CLOUD_SERVICE_NAME, services);
-        return cfg;
     }
 
     @Activate
     protected void activate(Map<String, Object> properties) {
         this.httpProxyHost = PropertiesUtil.toString(properties.get(PROP_HTTP_PROXY_HOST), null);
         this.httpProxyPort = PropertiesUtil.toInteger(properties.get(PROP_HTTP_PROXY_PORT), 0);
+        this.useSsl = PropertiesUtil.toBoolean(properties.get(PROP_USE_SSL), DEFAULT_USE_SSL);
         this.factory = new TwitterFactory(buildConfiguration());
     }
 

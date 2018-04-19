@@ -19,6 +19,7 @@
  */
 package com.adobe.acs.commons.httpcache.config;
 
+import aQute.bnd.annotation.ProviderType;
 import com.adobe.acs.commons.httpcache.exception.HttpCacheKeyCreationException;
 import com.adobe.acs.commons.httpcache.exception.HttpCacheRepositoryAccessException;
 import com.adobe.acs.commons.httpcache.keys.CacheKey;
@@ -32,7 +33,15 @@ import java.util.regex.Pattern;
  * details and invalidation JCR path details are captured through configs. Developer hook supplied for extension of
  * cache config via <code> HttpCacheConfigExtension</code>
  */
+
+@ProviderType
 public interface HttpCacheConfig {
+
+    public enum FilterScope {
+        REQUEST,
+        INCLUDE
+    }
+
     /**
      * Name of the configured cache store.
      *
@@ -91,6 +100,15 @@ public interface HttpCacheConfig {
     CacheKey buildCacheKey(SlingHttpServletRequest request) throws HttpCacheKeyCreationException;
 
     /**
+     * Creates the CacheKey object using the CacheKeyFactory associated with this HttpCacheConfig factory instance.
+     *
+     * @param resourcePath the resourcePath associated with the Cache Key
+     * @return the CacheKey
+     */
+    CacheKey buildCacheKey(String resourcePath) throws HttpCacheKeyCreationException;
+
+
+    /**
      * Determines if a JCR path is a candidate for invalidating this cache.
      *
      * @param path the jcr path
@@ -120,4 +138,9 @@ public interface HttpCacheConfig {
      * @return True if it accepts.
      */
     boolean acceptsRule(String servicePid);
+
+    /**
+     * @return the filter scope this HttpCacheConfig should involve itself in.
+     */
+    FilterScope getFilterScope();
 }

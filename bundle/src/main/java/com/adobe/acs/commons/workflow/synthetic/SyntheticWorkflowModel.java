@@ -20,18 +20,19 @@
 
 package com.adobe.acs.commons.workflow.synthetic;
 
+import aQute.bnd.annotation.ProviderType;
+
 import java.util.Map;
 
+@ProviderType
 public interface SyntheticWorkflowModel {
 
     /**
-     *
      * @return
      */
     String[] getWorkflowProcessNames();
 
     /**
-     *
      * @return
      */
     Map<String, Map<String, Object>> getSyntheticWorkflowModelData();
